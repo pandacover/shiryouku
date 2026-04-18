@@ -40,7 +40,7 @@ export const DocumentsPage = () => {
                   reindex().then(() => embedAll());
                 }}
               >
-                {isReindexing ?
+                {!isReindexing ?
                   <RefreshCcwIcon className="size-4" /> :
                   <RePixelLoader pixelSize={1} gap={0.5} />
                 }

@@ -8,8 +8,6 @@ export const Home = () => {
         <h1>Shiryouku</h1>
       </div>
       <div className="min-h-0 flex-1">
-        {/* <ChunkConstellation /> */}
-        <ShiryoukuLoader pixelSize={20} />
       </div>
     </div>
   );

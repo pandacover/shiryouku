@@ -80,7 +80,6 @@ export const ResearchPage = () => {
 
   const renderMessage = (message: UIMessage) => {
     const { text, thoughts } = classifyParts(message);
-    console.log(thoughts)
 
     const getStatus = (state: string) =>
       state === "done" ? ("complete" as const) : ("active" as const);
@@ -122,6 +121,7 @@ export const ResearchPage = () => {
             </ChainOfThoughtContent>
           </ChainOfThought>
         )}
+        <div className="w-full py-2" />
         {text.map((m, i) => (
           <Message from={message.role} key={`${message.id}-${i}`}>
             <MessageContent>
