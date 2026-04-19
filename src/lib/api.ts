@@ -178,11 +178,10 @@ export async function reindexDocs() {
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const error =
-      (data as Record<string, unknown>).error ?? `Reindex failed: ${res.status}`;
+      (data as Record<string, unknown>).error ??
+      `Reindex failed: ${res.status}`;
     const details = (data as Record<string, unknown>).details;
-    throw new Error(
-      details ? `${error}: ${details}` : (error as string),
-    );
+    throw new Error(details ? `${error}: ${details}` : (error as string));
   }
 
   const json = (await res.json()) as ApiResponse<ReindexResponse>;

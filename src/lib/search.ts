@@ -1,319 +1,435 @@
 import { BM25 } from "fast-bm25";
+import { Context, Effect, Layer, Ref } from "effect";
 import type { ChunkMeta } from "@/lib/chunk";
-import { getDb } from "@/lib/db";
+import { Database, type DocRow, type DocChunkRow } from "@/lib/db";
+import { SearchIndexError } from "@/lib/errors";
 
 export interface SearchMatch {
-  chunkId: string;
-  text: string;
-  score: number;
-  startIndex: number;
-  endIndex: number;
-  tokenCount: number;
-  prevChunkId: string | null;
-  nextChunkId: string | null;
-  siblings: Array<{
-    chunkId: string;
-    text: string;
-    direction: "prev" | "next";
+  readonly chunkId: string;
+  readonly text: string;
+  readonly score: number;
+  readonly startIndex: number;
+  readonly endIndex: number;
+  readonly tokenCount: number;
+  readonly prevChunkId: string | null;
+  readonly nextChunkId: string | null;
+  readonly siblings: ReadonlyArray<{
+    readonly chunkId: string;
+    readonly text: string;
+    readonly direction: "prev" | "next";
   }>;
 }
 
 export interface SearchResultGroup {
-  doc: { id: string; name: string; fileType: string };
-  matches: SearchMatch[];
+  readonly doc: {
+    readonly id: string;
+    readonly name: string;
+    readonly fileType: string;
+  };
+  readonly matches: ReadonlyArray<SearchMatch>;
 }
 
+export interface ConstellationData {
+  readonly documents: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly fileType: string;
+    readonly chunks: ReadonlyArray<{
+      readonly chunkId: string;
+      readonly text: string;
+      readonly startIndex: number;
+      readonly endIndex: number;
+      readonly tokenCount: number;
+      readonly prevChunkId: string | null;
+      readonly nextChunkId: string | null;
+    }>;
+  }>;
+}
+
+export type SearchIndexStatus =
+  | "uninitialized"
+  | "initializing"
+  | "ready"
+  | "error";
+
+interface SearchIndexState {
+  bm25: BM25 | null;
+  chunkMap: Map<string, ChunkMeta>;
+  indexToChunkId: string[];
+  docChunkIds: Map<string, string[]>;
+  docMeta: Map<string, { name: string; fileType: string }>;
+}
+
+export class SearchIndex extends Context.Tag("SearchIndex")<
+  SearchIndex,
+  {
+    readonly status: Effect.Effect<SearchIndexStatus, never>;
+    readonly addFromStoredChunks: (
+      docId: string,
+      docName: string,
+      fileType: string,
+      chunks: ReadonlyArray<ChunkMeta>,
+    ) => Effect.Effect<void, SearchIndexError>;
+    readonly removeDocument: (
+      docId: string,
+    ) => Effect.Effect<void, SearchIndexError>;
+    readonly search: (
+      query: string,
+      topK?: number,
+    ) => Effect.Effect<ReadonlyArray<SearchResultGroup>, SearchIndexError>;
+    readonly reindex: () => Effect.Effect<
+      { readonly documentCount: number; readonly chunkCount: number },
+      SearchIndexError
+    >;
+    readonly getConstellationData: () => Effect.Effect<
+      ConstellationData,
+      never
+    >;
+  }
+>() {}
+
 function rowToChunk(
-  row: Record<string, unknown>,
+  row: DocChunkRow,
   docName: string,
   fileType: string,
 ): ChunkMeta {
   return {
-    chunkId: row.chunk_id as string,
-    docId: row.doc_id as string,
+    chunkId: row.chunk_id,
+    docId: row.doc_id,
     docName,
     fileType,
-    text: row.text as string,
-    startIndex: row.start_index as number,
-    endIndex: row.end_index as number,
-    tokenCount: row.token_count as number,
-    prevChunkId: (row.prev_chunk_id as string) || null,
-    nextChunkId: (row.next_chunk_id as string) || null,
+    text: row.text,
+    startIndex: row.start_index ?? 0,
+    endIndex: row.end_index ?? 0,
+    tokenCount: row.token_count ?? 0,
+    prevChunkId: row.prev_chunk_id,
+    nextChunkId: row.next_chunk_id,
   };
 }
 
-const CHUNKS_SQL =
-  "SELECT chunk_id, doc_id, text, start_index, end_index, token_count, prev_chunk_id, next_chunk_id FROM doc_chunks WHERE doc_id = ? ORDER BY start_index";
+export const SearchIndexLive = Layer.effect(
+  SearchIndex,
+  Effect.gen(function* () {
+    const db = yield* Database;
+    const statusRef = yield* Ref.make<SearchIndexStatus>("uninitialized");
+    const stateRef = yield* Ref.make<SearchIndexState>({
+      bm25: null,
+      chunkMap: new Map(),
+      indexToChunkId: [],
+      docChunkIds: new Map(),
+      docMeta: new Map(),
+    });
 
-class SearchIndex {
-  private bm25: BM25 | null = null;
-  private chunkMap: Map<string, ChunkMeta> = new Map();
-  private indexToChunkId: string[] = [];
-  private docChunkIds: Map<string, string[]> = new Map();
-  private docMeta: Map<string, { name: string; fileType: string }> = new Map();
-  private initialized = false;
-  private initPromise: Promise<void> | null = null;
+    const rebuildIndex = Effect.gen(function* () {
+      const state = yield* Ref.get(stateRef);
+      const bm25 = new BM25([], { stemming: true });
+      const newIndexToChunkId: string[] = [];
 
-  async ensureInitialized(): Promise<void> {
-    if (this.initialized) return;
-    if (!this.initPromise) {
-      this.initPromise = this.initialize();
-    }
-    await this.initPromise;
-  }
+      for (const [docId, chunkIds] of state.docChunkIds) {
+        const meta = state.docMeta.get(docId);
+        if (!meta) continue;
 
-  private async initialize(): Promise<void> {
-    const db = await getDb();
+        for (const chunkId of chunkIds) {
+          const chunk = state.chunkMap.get(chunkId);
+          if (!chunk) continue;
 
-    const docs = db.prepare("SELECT * FROM docs").all() as Record<
-      string,
-      unknown
-    >[];
-
-    this.bm25 = new BM25([], { stemming: true });
-    this.chunkMap = new Map();
-    this.indexToChunkId = [];
-    this.docChunkIds = new Map();
-    this.docMeta = new Map();
-
-    for (const doc of docs) {
-      const docId = doc.id as string;
-      const docName = doc.name as string;
-      const fileType = doc.file_type as string;
-
-      this.docMeta.set(docId, { name: docName, fileType });
-
-      const rows = db.prepare(CHUNKS_SQL).all(docId) as Record<
-        string,
-        unknown
-      >[];
-      if (rows.length === 0) continue;
-
-      const chunkIds: string[] = [];
-      for (const row of rows) {
-        const chunk = rowToChunk(row, docName, fileType);
-        this.chunkMap.set(chunk.chunkId, chunk);
-        this.indexToChunkId.push(chunk.chunkId);
-        chunkIds.push(chunk.chunkId);
-        await this.bm25.addDocument({
-          text: chunk.text,
-          docName: chunk.docName,
-        });
+          newIndexToChunkId.push(chunkId);
+          bm25.addDocument({ text: chunk.text, docName: meta.name });
+        }
       }
-      this.docChunkIds.set(docId, chunkIds);
-    }
 
-    this.initialized = true;
-  }
+      yield* Ref.update(stateRef, (s) => ({
+        ...s,
+        bm25,
+        indexToChunkId: newIndexToChunkId,
+      }));
+    });
 
-  async addFromStoredChunks(
-    docId: string,
-    docName: string,
-    fileType: string,
-    chunks: ChunkMeta[],
-  ): Promise<void> {
-    await this.ensureInitialized();
+    const initialize = Effect.gen(function* () {
+      yield* Ref.set(statusRef, "initializing");
+      yield* Effect.catchAll(
+        Effect.gen(function* () {
+          const docs = yield* db.listDocs();
 
-    if (this.docChunkIds.has(docId)) {
-      await this.removeDocument(docId);
-    }
+          const bm25 = new BM25([], { stemming: true });
+          const chunkMap = new Map<string, ChunkMeta>();
+          const indexToChunkId: string[] = [];
+          const docChunkIds = new Map<string, string[]>();
+          const docMeta = new Map<string, { name: string; fileType: string }>();
 
-    if (chunks.length === 0) return;
+          for (const doc of docs) {
+            const docId = doc.id;
+            const docName = doc.name;
+            const fileType = doc.file_type;
 
-    this.docMeta.set(docId, { name: docName, fileType });
+            docMeta.set(docId, { name: docName, fileType });
 
-    const chunkIds: string[] = [];
-    for (const chunk of chunks) {
-      const enriched: ChunkMeta = { ...chunk, docName, fileType };
-      this.chunkMap.set(chunk.chunkId, enriched);
-      this.indexToChunkId.push(chunk.chunkId);
-      chunkIds.push(chunk.chunkId);
-      await this.bm25?.addDocument({
-        text: chunk.text,
-        docName,
+            const rows = yield* db.getChunksForDoc(docId);
+            if (rows.length === 0) continue;
+
+            const chunkIds: string[] = [];
+            for (const row of rows) {
+              const chunk = rowToChunk(row, docName, fileType);
+              chunkMap.set(chunk.chunkId, chunk);
+              indexToChunkId.push(chunk.chunkId);
+              chunkIds.push(chunk.chunkId);
+              bm25.addDocument({ text: chunk.text, docName });
+            }
+            docChunkIds.set(docId, chunkIds);
+          }
+
+          yield* Ref.set(stateRef, {
+            bm25,
+            chunkMap,
+            indexToChunkId,
+            docChunkIds,
+            docMeta,
+          });
+          yield* Ref.set(statusRef, "ready");
+        }),
+        (error) =>
+          Effect.gen(function* () {
+            yield* Ref.set(statusRef, "error");
+            yield* Effect.fail(new SearchIndexError({ cause: error }));
+          }),
+      );
+    });
+
+    yield* initialize;
+
+    const addFromStoredChunks = (
+      docId: string,
+      docName: string,
+      fileType: string,
+      chunks: ReadonlyArray<ChunkMeta>,
+    ): Effect.Effect<void, SearchIndexError> =>
+      Effect.gen(function* () {
+        yield* Ref.update(stateRef, (s) => {
+          if (s.docChunkIds.has(docId)) return s;
+          return s;
+        });
+
+        const existing = yield* Ref.get(stateRef);
+        if (existing.docChunkIds.has(docId)) {
+          yield* removeDocument(docId);
+        }
+
+        if (chunks.length === 0) return;
+
+        yield* Ref.update(stateRef, (s) => {
+          const newDocMeta = new Map(s.docMeta);
+          newDocMeta.set(docId, { name: docName, fileType });
+
+          const newChunkMap = new Map(s.chunkMap);
+          const newIndexToChunkId = [...s.indexToChunkId];
+          const chunkIds: string[] = [];
+
+          for (const chunk of chunks) {
+            const enriched: ChunkMeta = { ...chunk, docName, fileType };
+            newChunkMap.set(chunk.chunkId, enriched);
+            newIndexToChunkId.push(chunk.chunkId);
+            chunkIds.push(chunk.chunkId);
+          }
+
+          const newDocChunkIds = new Map(s.docChunkIds);
+          newDocChunkIds.set(docId, chunkIds);
+
+          return {
+            ...s,
+            chunkMap: newChunkMap,
+            indexToChunkId: newIndexToChunkId,
+            docChunkIds: newDocChunkIds,
+            docMeta: newDocMeta,
+          };
+        });
+
+        const state = yield* Ref.get(stateRef);
+        if (state.bm25) {
+          for (const chunk of chunks) {
+            state.bm25.addDocument({ text: chunk.text, docName });
+          }
+        }
       });
-    }
-    this.docChunkIds.set(docId, chunkIds);
-  }
 
-  async removeDocument(docId: string): Promise<void> {
-    await this.ensureInitialized();
+    const removeDocument = (
+      docId: string,
+    ): Effect.Effect<void, SearchIndexError> =>
+      Effect.gen(function* () {
+        yield* Ref.update(stateRef, (s) => {
+          const chunkIds = s.docChunkIds.get(docId);
+          if (!chunkIds) return s;
 
-    const chunkIds = this.docChunkIds.get(docId);
-    if (!chunkIds) return;
+          const newChunkMap = new Map(s.chunkMap);
+          for (const id of chunkIds) {
+            newChunkMap.delete(id);
+          }
 
-    for (const id of chunkIds) {
-      this.chunkMap.delete(id);
-    }
-    this.docChunkIds.delete(docId);
-    this.docMeta.delete(docId);
+          const newDocChunkIds = new Map(s.docChunkIds);
+          newDocChunkIds.delete(docId);
 
-    await this.rebuildIndex();
-  }
+          const newDocMeta = new Map(s.docMeta);
+          newDocMeta.delete(docId);
 
-  async search(query: string, topK = 10): Promise<SearchResultGroup[]> {
-    await this.ensureInitialized();
-
-    if (!query.trim() || !this.bm25) return [];
-
-    const results = this.bm25.searchPhrase(query, topK);
-
-    const groupedResults = new Map<
-      string,
-      {
-        doc: { id: string; name: string; fileType: string };
-        matches: SearchMatch[];
-      }
-    >();
-
-    for (const result of results) {
-      const chunkId = this.indexToChunkId[result.index];
-      if (!chunkId) continue;
-
-      const chunk = this.chunkMap.get(chunkId);
-      if (!chunk) continue;
-
-      const prevChunk = chunk.prevChunkId
-        ? this.chunkMap.get(chunk.prevChunkId)
-        : null;
-      const nextChunk = chunk.nextChunkId
-        ? this.chunkMap.get(chunk.nextChunkId)
-        : null;
-
-      const siblings: SearchMatch["siblings"] = [];
-      if (prevChunk) {
-        siblings.push({
-          chunkId: prevChunk.chunkId,
-          text: prevChunk.text,
-          direction: "prev",
+          return {
+            ...s,
+            chunkMap: newChunkMap,
+            docChunkIds: newDocChunkIds,
+            docMeta: newDocMeta,
+          };
         });
-      }
-      if (nextChunk) {
-        siblings.push({
-          chunkId: nextChunk.chunkId,
-          text: nextChunk.text,
-          direction: "next",
-        });
-      }
 
-      const match: SearchMatch = {
-        chunkId: chunk.chunkId,
-        text: chunk.text,
-        score: result.score,
-        startIndex: chunk.startIndex,
-        endIndex: chunk.endIndex,
-        tokenCount: chunk.tokenCount,
-        prevChunkId: chunk.prevChunkId,
-        nextChunkId: chunk.nextChunkId,
-        siblings,
-      };
+        yield* rebuildIndex;
+      });
 
-      const docId = chunk.docId;
-      if (!groupedResults.has(docId)) {
-        const meta = this.docMeta.get(docId) || {
-          name: chunk.docName,
-          fileType: chunk.fileType,
+    const search = (
+      query: string,
+      topK = 10,
+    ): Effect.Effect<ReadonlyArray<SearchResultGroup>, SearchIndexError> =>
+      Effect.gen(function* () {
+        if (!query.trim()) return [];
+
+        const state = yield* Ref.get(stateRef);
+        if (!state.bm25) return [];
+
+        const results = state.bm25.searchPhrase(query, topK);
+        const groupedResults = new Map<
+          string,
+          {
+            doc: { id: string; name: string; fileType: string };
+            matches: SearchMatch[];
+          }
+        >();
+
+        for (const result of results) {
+          const chunkId = state.indexToChunkId[result.index];
+          if (!chunkId) continue;
+
+          const chunk = state.chunkMap.get(chunkId);
+          if (!chunk) continue;
+
+          const prevChunk = chunk.prevChunkId
+            ? state.chunkMap.get(chunk.prevChunkId)
+            : null;
+          const nextChunk = chunk.nextChunkId
+            ? state.chunkMap.get(chunk.nextChunkId)
+            : null;
+
+          const siblings: Array<{
+            readonly chunkId: string;
+            readonly text: string;
+            readonly direction: "prev" | "next";
+          }> = [];
+          if (prevChunk) {
+            siblings.push({
+              chunkId: prevChunk.chunkId,
+              text: prevChunk.text,
+              direction: "prev" as const,
+            });
+          }
+          if (nextChunk) {
+            siblings.push({
+              chunkId: nextChunk.chunkId,
+              text: nextChunk.text,
+              direction: "next" as const,
+            });
+          }
+
+          const match: SearchMatch = {
+            chunkId: chunk.chunkId,
+            text: chunk.text,
+            score: result.score,
+            startIndex: chunk.startIndex,
+            endIndex: chunk.endIndex,
+            tokenCount: chunk.tokenCount,
+            prevChunkId: chunk.prevChunkId,
+            nextChunkId: chunk.nextChunkId,
+            siblings,
+          };
+
+          const docId = chunk.docId;
+          if (!groupedResults.has(docId)) {
+            const meta = state.docMeta.get(docId) ?? {
+              name: chunk.docName,
+              fileType: chunk.fileType,
+            };
+            groupedResults.set(docId, {
+              doc: { id: docId, name: meta.name, fileType: meta.fileType },
+              matches: [],
+            });
+          }
+          groupedResults.get(docId)?.matches.push(match);
+        }
+
+        return Array.from(groupedResults.values());
+      });
+
+    const reindex = (): Effect.Effect<
+      { readonly documentCount: number; readonly chunkCount: number },
+      SearchIndexError
+    > =>
+      Effect.gen(function* () {
+        yield* initialize;
+        const state = yield* Ref.get(stateRef);
+        return {
+          documentCount: state.docMeta.size,
+          chunkCount: state.chunkMap.size,
         };
-        groupedResults.set(docId, {
-          doc: { id: docId, name: meta.name, fileType: meta.fileType },
-          matches: [],
-        });
-      }
-      groupedResults.get(docId)?.matches.push(match);
-    }
-
-    return Array.from(groupedResults.values());
-  }
-
-  getConstellationData(): {
-    documents: Array<{
-      id: string;
-      name: string;
-      fileType: string;
-      chunks: Array<{
-        chunkId: string;
-        text: string;
-        startIndex: number;
-        endIndex: number;
-        tokenCount: number;
-        prevChunkId: string | null;
-        nextChunkId: string | null;
-      }>;
-    }>;
-  } {
-    const documents: Array<{
-      id: string;
-      name: string;
-      fileType: string;
-      chunks: Array<{
-        chunkId: string;
-        text: string;
-        startIndex: number;
-        endIndex: number;
-        tokenCount: number;
-        prevChunkId: string | null;
-        nextChunkId: string | null;
-      }>;
-    }> = [];
-
-    for (const [docId, chunkIds] of this.docChunkIds) {
-      const meta = this.docMeta.get(docId);
-      if (!meta) continue;
-
-      const chunks = chunkIds
-        .map((id) => this.chunkMap.get(id))
-        .filter((c): c is ChunkMeta => c !== undefined)
-        .map((c) => ({
-          chunkId: c.chunkId,
-          text: c.text,
-          startIndex: c.startIndex,
-          endIndex: c.endIndex,
-          tokenCount: c.tokenCount,
-          prevChunkId: c.prevChunkId,
-          nextChunkId: c.nextChunkId,
-        }));
-
-      documents.push({
-        id: docId,
-        name: meta.name,
-        fileType: meta.fileType,
-        chunks,
       });
-    }
 
-    return { documents };
-  }
+    const getConstellationData = (): Effect.Effect<ConstellationData, never> =>
+      Effect.gen(function* () {
+        const state = yield* Ref.get(stateRef);
 
-  async reindex(): Promise<{ documentCount: number; chunkCount: number }> {
-    this.initialized = false;
-    this.initPromise = null;
-    await this.ensureInitialized();
-    return {
-      documentCount: this.docMeta.size,
-      chunkCount: this.chunkMap.size,
-    };
-  }
+        const documents: Array<{
+          readonly id: string;
+          readonly name: string;
+          readonly fileType: string;
+          readonly chunks: readonly {
+            readonly chunkId: string;
+            readonly text: string;
+            readonly startIndex: number;
+            readonly endIndex: number;
+            readonly tokenCount: number;
+            readonly prevChunkId: string | null;
+            readonly nextChunkId: string | null;
+          }[];
+        }> = [];
 
-  private async rebuildIndex(): Promise<void> {
-    this.bm25 = new BM25([], { stemming: true });
-    this.indexToChunkId = [];
+        for (const [docId, chunkIds] of state.docChunkIds) {
+          const meta = state.docMeta.get(docId);
+          if (!meta) continue;
 
-    for (const [docId, chunkIds] of this.docChunkIds) {
-      const meta = this.docMeta.get(docId);
-      if (!meta) continue;
+          const chunks = chunkIds
+            .map((id) => state.chunkMap.get(id))
+            .filter((c): c is ChunkMeta => c !== undefined)
+            .map((c) => ({
+              chunkId: c.chunkId,
+              text: c.text,
+              startIndex: c.startIndex,
+              endIndex: c.endIndex,
+              tokenCount: c.tokenCount,
+              prevChunkId: c.prevChunkId,
+              nextChunkId: c.nextChunkId,
+            }));
 
-      for (const chunkId of chunkIds) {
-        const chunk = this.chunkMap.get(chunkId);
-        if (!chunk) continue;
+          documents.push({
+            id: docId,
+            name: meta.name,
+            fileType: meta.fileType,
+            chunks,
+          });
+        }
 
-        this.indexToChunkId.push(chunkId);
-        await this.bm25.addDocument({
-          text: chunk.text,
-          docName: meta.name,
-        });
-      }
-    }
-  }
-}
+        return { documents };
+      });
 
-export const searchIndex = new SearchIndex();
+    return SearchIndex.of({
+      status: Ref.get(statusRef),
+      addFromStoredChunks,
+      removeDocument,
+      search,
+      reindex,
+      getConstellationData,
+    });
+  }),
+);

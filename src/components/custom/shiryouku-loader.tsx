@@ -23,12 +23,10 @@ function normalizeAscii(input: string) {
     ...lines.map((l) => {
       const idx = l.search(/[^ ]/);
       return idx === -1 ? Infinity : idx;
-    })
+    }),
   );
 
-  const right = Math.max(
-    ...lines.map((l) => l.length - l.trimEnd().length)
-  );
+  const right = Math.max(...lines.map((l) => l.length - l.trimEnd().length));
 
   return lines.map((l) => l.slice(left, l.length - right));
 }
@@ -40,7 +38,7 @@ function buildGrid(asciiLines: string[]) {
     line
       .padEnd(maxWidth, " ")
       .split("")
-      .map((ch) => (ch === "#" ? 1 : 0))
+      .map((ch) => (ch === "#" ? 1 : 0)),
   );
 }
 
@@ -87,7 +85,7 @@ export function ShiryoukuLoader() {
                   : "none",
               }}
             />
-          ))
+          )),
         )}
       </div>
     </div>

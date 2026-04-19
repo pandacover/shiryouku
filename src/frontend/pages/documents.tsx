@@ -40,10 +40,11 @@ export const DocumentsPage = () => {
                   reindex().then(() => embedAll());
                 }}
               >
-                {!isReindexing ?
-                  <RefreshCcwIcon className="size-4" /> :
+                {!isReindexing ? (
+                  <RefreshCcwIcon className="size-4" />
+                ) : (
                   <RePixelLoader pixelSize={1} gap={0.5} />
-                }
+                )}
               </TooltipTrigger>
               <TooltipContent>Re-index documents</TooltipContent>
             </Tooltip>

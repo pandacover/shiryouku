@@ -1,24 +1,22 @@
+import { Effect } from "effect";
 import { Hono } from "hono";
-import type { ReindexResponse } from "@/api/schemas/search";
-import { getDb } from "@/lib/db";
+import { runEffect } from "@/api/bridge";
+import { Database } from "@/lib/db";
 import { reingestAllDocuments } from "@/lib/ingest";
-import { searchIndex } from "@/lib/search";
+import { SearchIndex } from "@/lib/search";
 
 export const indexingRoutes = new Hono()
   .post("/reindex", async (c) => {
-    try {
-      const result = await reingestAllDocuments();
-      const response: ReindexResponse = {
-        documentCount: result.documentCount,
-        chunkCount: result.chunkCount,
-      };
-      return c.json({ data: response });
-    } catch (err) {
-      console.error("[Reindex Error]", err);
-      const details =
-        (err as Error).message || (err as Error).stack || String(err);
-      return c.json({ error: "Reindex failed", details }, 500);
-    }
+    return runEffect(
+      c,
+      Effect.gen(function* () {
+        const result = yield* reingestAllDocuments();
+        return {
+          documentCount: result.documentCount,
+          chunkCount: result.chunkCount,
+        };
+      }),
+    );
   })
 
   .post("/add", async (c) => {
@@ -27,70 +25,52 @@ export const indexingRoutes = new Hono()
 
     if (!docId) {
       return c.json(
-        {
-          error: "Validation failed",
-          details: "docId is required",
-        },
+        { error: "Validation failed", details: "docId is required" },
         400,
       );
     }
 
-    try {
-      const db = await getDb();
-      const doc = db
-        .prepare("SELECT name, file_type FROM docs WHERE id = ?")
-        .get(docId) as Record<string, unknown> | undefined;
+    return runEffect(
+      c,
+      Effect.gen(function* () {
+        const db = yield* Database;
+        const doc = yield* db.getDoc(docId);
+        const rows = yield* db.getChunksForDoc(docId);
 
-      if (!doc) {
-        return c.json({ error: "Document not found" }, 404);
-      }
+        const chunks = rows.map((r) => ({
+          chunkId: r.chunk_id,
+          docId: r.doc_id,
+          docName: doc.name,
+          fileType: doc.file_type,
+          text: r.text,
+          startIndex: r.start_index ?? 0,
+          endIndex: r.end_index ?? 0,
+          tokenCount: r.token_count ?? 0,
+          prevChunkId: r.prev_chunk_id,
+          nextChunkId: r.next_chunk_id,
+        }));
 
-      const rows = db
-        .prepare(
-          "SELECT chunk_id, doc_id, text, start_index, end_index, token_count, prev_chunk_id, next_chunk_id FROM doc_chunks WHERE doc_id = ? ORDER BY start_index",
-        )
-        .all(docId) as Record<string, unknown>[];
-
-      const chunks = rows.map((r) => ({
-        chunkId: r.chunk_id as string,
-        docId: r.doc_id as string,
-        docName: doc.name as string,
-        fileType: doc.file_type as string,
-        text: r.text as string,
-        startIndex: r.start_index as number,
-        endIndex: r.end_index as number,
-        tokenCount: r.token_count as number,
-        prevChunkId: (r.prev_chunk_id as string) || null,
-        nextChunkId: (r.next_chunk_id as string) || null,
-      }));
-
-      await searchIndex.addFromStoredChunks(
-        docId,
-        doc.name as string,
-        doc.file_type as string,
-        chunks,
-      );
-      return c.json({ data: { docId } }, 201);
-    } catch (err) {
-      console.error("[Index Add Error]", err);
-      return c.json(
-        { error: "Index add failed", details: (err as Error).message },
-        500,
-      );
-    }
+        const search = yield* SearchIndex;
+        yield* search.addFromStoredChunks(
+          docId,
+          doc.name,
+          doc.file_type,
+          chunks,
+        );
+        return { docId };
+      }),
+    );
   })
 
   .delete("/:docId", async (c) => {
     const docId = c.req.param("docId");
 
-    try {
-      await searchIndex.removeDocument(docId);
-      return c.json({ data: { docId } });
-    } catch (err) {
-      console.error("[Index Remove Error]", err);
-      return c.json(
-        { error: "Index remove failed", details: (err as Error).message },
-        500,
-      );
-    }
+    return runEffect(
+      c,
+      Effect.gen(function* () {
+        const search = yield* SearchIndex;
+        yield* search.removeDocument(docId);
+        return { docId };
+      }),
+    );
   });
