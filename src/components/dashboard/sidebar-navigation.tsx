@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 
 const Links = [
   {
-    to: "/dashboard",
+    to: "/dashboard/home",
     icon: <HomeIcon className="size-4" />,
     label: "Home",
   },
