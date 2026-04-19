@@ -93,7 +93,15 @@ export const EmbeddingsLive = Layer.effect(
           docId,
           docName,
           fileType,
-          rows.map((r) => ({ chunkId: r.chunk_id, text: r.text })),
+          rows.map((r) => ({
+            chunkId: r.chunk_id,
+            text: r.text,
+            startIndex: r.start_index ?? 0,
+            endIndex: r.end_index ?? 0,
+            tokenCount: r.token_count ?? 0,
+            prevChunkId: r.prev_chunk_id,
+            nextChunkId: r.next_chunk_id,
+          })),
           embeddings,
         );
 

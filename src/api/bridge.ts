@@ -7,6 +7,7 @@ import type {
   EmbeddingError,
   SearchIndexError,
   ValidationError,
+  WebsiteFetchError,
 } from "@/lib/errors";
 import { AppLayer } from "@/lib/runtime";
 
@@ -101,6 +102,16 @@ export function runEffect<A, E, R>(
                   details: String((err as unknown as ChunkingError).cause),
                 },
                 500,
+              ),
+            );
+          case "WebsiteFetchError":
+            return Effect.succeed(
+              ctx.json(
+                {
+                  error: "Website fetch error",
+                  details: (err as unknown as WebsiteFetchError).message,
+                },
+                400,
               ),
             );
           case "SqlError": {

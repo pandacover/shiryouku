@@ -1,16 +1,25 @@
-import { Layer, Effect } from "effect";
-import { DatabaseLive, Database, type DocRow, type DocContentRow, type DocChunkRow, type CreateDocInput, type UpdateDocInput, DbError } from "@/lib/db";
-import { SearchIndexLive, SearchIndex } from "@/lib/search";
-import { ChromaDbLive } from "@/lib/chroma";
-import { EmbeddingsLive } from "@/lib/embed";
+import { Effect, Layer } from "effect";
 import { OllamaModelLive } from "@/lib/chat";
+import { ChromaDbLive } from "@/lib/chroma";
+import {
+  type CreateDocInput,
+  Database,
+  DatabaseLive,
+  type DocChunkRow,
+  type DocContentRow,
+  type DocRow,
+  type UpdateDocInput,
+} from "@/lib/db";
+import { EmbeddingsLive } from "@/lib/embed";
 import { DocumentNotFoundError } from "@/lib/errors";
+import { SearchIndexLive } from "@/lib/search";
+import { WebsiteFetcherLive } from "@/lib/website";
 
 /**
  * Test helpers for database and service testing.
- * 
+ *
  * Uses Supabase REST API for database operations.
- * Requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY 
+ * Requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
  * or SUPABASE_SERVICE_ROLE_KEY environment variables to be set.
  */
 
@@ -25,6 +34,14 @@ const createMockDatabase = () => {
         name: "Test Doc 1",
         file_type: "md",
         size: 100,
+        source_type: "file",
+        source_url: null,
+        canonical_url: null,
+        title: null,
+        description: null,
+        last_fetched_at: null,
+        fetch_status: null,
+        fetch_error: null,
         created_at: Date.now(),
         updated_at: Date.now(),
       },
@@ -36,6 +53,14 @@ const createMockDatabase = () => {
         name: "Test Doc 2",
         file_type: "txt",
         size: 200,
+        source_type: "file",
+        source_url: null,
+        canonical_url: null,
+        title: null,
+        description: null,
+        last_fetched_at: null,
+        fetch_status: null,
+        fetch_error: null,
         created_at: Date.now(),
         updated_at: Date.now(),
       },
@@ -84,11 +109,32 @@ const createMockDatabase = () => {
   ]);
 
   return Database.of({
-    listDocs: () => Effect.succeed(Array.from(docs.values())),
+    listDocs: () =>
+      Effect.succeed(
+        Array.from(docs.values()).filter((doc) => doc.source_type === "file"),
+      ),
+
+    listWebsiteSources: () =>
+      Effect.succeed(
+        Array.from(docs.values()).filter(
+          (doc) => doc.source_type === "website",
+        ),
+      ),
+
+    listIndexableDocs: () => Effect.succeed(Array.from(docs.values())),
 
     getDoc: (id: string) => {
       const doc = docs.get(id);
       if (!doc) return Effect.fail(new DocumentNotFoundError({ docId: id }));
+      return Effect.succeed(doc);
+    },
+
+    getWebsiteSourceByUrl: (url: string) => {
+      const doc =
+        Array.from(docs.values()).find(
+          (candidate) =>
+            candidate.source_type === "website" && candidate.source_url === url,
+        ) ?? null;
       return Effect.succeed(doc);
     },
 
@@ -107,6 +153,14 @@ const createMockDatabase = () => {
         name: input.name,
         file_type: input.fileType,
         size: input.size,
+        source_type: input.sourceType ?? "file",
+        source_url: input.sourceUrl ?? null,
+        canonical_url: input.canonicalUrl ?? null,
+        title: input.title ?? null,
+        description: input.description ?? null,
+        last_fetched_at: input.lastFetchedAt ?? null,
+        fetch_status: input.fetchStatus ?? null,
+        fetch_error: input.fetchError ?? null,
         created_at: now,
         updated_at: now,
       };
@@ -123,13 +177,38 @@ const createMockDatabase = () => {
 
     updateDoc: (id: string, input: UpdateDocInput) => {
       const existing = docs.get(id);
-      if (!existing) return Effect.fail(new DocumentNotFoundError({ docId: id }));
+      if (!existing)
+        return Effect.fail(new DocumentNotFoundError({ docId: id }));
       const now = Date.now();
       const updated: DocRow = {
         ...existing,
         name: input.name ?? existing.name,
         file_type: input.fileType ?? existing.file_type,
         size: input.size ?? existing.size,
+        source_type: existing.source_type,
+        source_url:
+          input.sourceUrl !== undefined ? input.sourceUrl : existing.source_url,
+        canonical_url:
+          input.canonicalUrl !== undefined
+            ? input.canonicalUrl
+            : existing.canonical_url,
+        title: input.title !== undefined ? input.title : existing.title,
+        description:
+          input.description !== undefined
+            ? input.description
+            : existing.description,
+        last_fetched_at:
+          input.lastFetchedAt !== undefined
+            ? input.lastFetchedAt
+            : existing.last_fetched_at,
+        fetch_status:
+          input.fetchStatus !== undefined
+            ? input.fetchStatus
+            : existing.fetch_status,
+        fetch_error:
+          input.fetchError !== undefined
+            ? input.fetchError
+            : existing.fetch_error,
         updated_at: now,
       };
       docs.set(id, updated);
@@ -152,7 +231,13 @@ const createMockDatabase = () => {
     upsertDocContent: (docId: string, content: string) => {
       const now = Date.now();
       const id = crypto.randomUUID();
-      const newContent: DocContentRow = { id, doc_id: docId, content, created_at: now, updated_at: now };
+      const newContent: DocContentRow = {
+        id,
+        doc_id: docId,
+        content,
+        created_at: now,
+        updated_at: now,
+      };
       contents.set(docId, newContent);
       return Effect.succeed(newContent);
     },
@@ -186,7 +271,9 @@ const createMockDatabase = () => {
 };
 
 // Create a fresh layer for each test
-export const DatabaseTest = Layer.fresh(Layer.sync(Database, createMockDatabase));
+export const DatabaseTest = Layer.fresh(
+  Layer.sync(Database, createMockDatabase),
+);
 
 // Full test layer with all services
 export const TestLayer = Layer.mergeAll(
@@ -194,23 +281,24 @@ export const TestLayer = Layer.mergeAll(
   SearchIndexLive,
   ChromaDbLive,
   EmbeddingsLive,
-  OllamaModelLive
+  OllamaModelLive,
+  WebsiteFetcherLive,
 );
 
 /**
  * Helper to run an effect and return the exit
  */
 export async function runEffect<A, E>(
-  effect: Effect.Effect<A, E>
+  effect: Effect.Effect<A, E>,
 ): Promise<Effect.Effect<A, E>> {
   return Effect.runPromiseExit(effect) as unknown as Effect.Effect<A, E>;
 }
 
 /**
  * Real Supabase integration test layer
- * 
+ *
  * Uses the actual DatabaseLive with Supabase REST client.
- * Requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY 
+ * Requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
  * or SUPABASE_SERVICE_ROLE_KEY environment variables.
  */
 export const DatabaseSupabaseTest = DatabaseLive;
@@ -223,5 +311,6 @@ export const IntegrationTestLayer = Layer.mergeAll(
   SearchIndexLive,
   ChromaDbLive,
   EmbeddingsLive,
-  OllamaModelLive
+  OllamaModelLive,
+  WebsiteFetcherLive,
 );

@@ -6,6 +6,7 @@ import { docsRoutes } from "./routes/docs";
 import { embeddingRoutes } from "./routes/embedding";
 import { indexingRoutes } from "./routes/indexing";
 import { searchRoutes } from "./routes/search";
+import { sourcesRoutes } from "./routes/sources";
 
 const api = new Hono()
   .basePath("/api")
@@ -19,6 +20,7 @@ const api = new Hono()
     );
   })
   .route("/docs", docsRoutes)
+  .route("/sources", sourcesRoutes)
   .route("/search", searchRoutes)
   .route("/chat", chatRoutes)
   .route("/indexing", indexingRoutes)

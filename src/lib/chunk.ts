@@ -2,7 +2,15 @@ import type { Chunk } from "@chonkiejs/core";
 import { RecursiveChunker } from "@chonkiejs/core";
 import { nanoid } from "nanoid";
 
-const CHUNKABLE_TYPES = new Set(["txt", "text/plain", "md", "markdown"]);
+const CHUNKABLE_TYPES = new Set([
+  "txt",
+  "text/plain",
+  "md",
+  "markdown",
+  "html",
+  "text/html",
+  "website",
+]);
 const DEFAULT_CHUNK_SIZE = 512;
 const OVERLAP_RATIO = 0.2;
 

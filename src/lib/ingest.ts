@@ -1,23 +1,29 @@
 import { Effect } from "effect";
-import { chunkDocument, isChunkable } from "@/lib/chunk";
-import type { ChunkMeta } from "@/lib/chunk";
-import { Database, type DocChunkRow, type DbError } from "@/lib/db";
-import { SearchIndex } from "@/lib/search";
 import { ChromaDb } from "@/lib/chroma";
+import { chunkDocument, isChunkable } from "@/lib/chunk";
+import { Database, type DbError, type DocChunkRow } from "@/lib/db";
 import { Embeddings } from "@/lib/embed";
 import {
-  DocumentNotFoundError,
-  SearchIndexError,
-  ChromaDBError,
-  EmbeddingError,
+  type ChromaDBError,
   ChunkingError,
+  type DocumentNotFoundError,
+  type EmbeddingError,
+  type SearchIndexError,
+  WebsiteFetchError,
 } from "@/lib/errors";
+import { SearchIndex } from "@/lib/search";
+import { WebsiteFetcher } from "@/lib/website";
 
 export const ingestDocument = (
   docId: string,
 ): Effect.Effect<
   { readonly chunkCount: number },
-  DbError | DocumentNotFoundError | SearchIndexError | ChromaDBError | EmbeddingError | ChunkingError,
+  | DbError
+  | DocumentNotFoundError
+  | SearchIndexError
+  | ChromaDBError
+  | EmbeddingError
+  | ChunkingError,
   Database | SearchIndex | ChromaDb | Embeddings
 > =>
   Effect.gen(function* () {
@@ -77,7 +83,15 @@ export const ingestDocument = (
       docId,
       docName,
       fileType,
-      chunks.map((c) => ({ chunkId: c.chunkId, text: c.text })),
+      chunks.map((c) => ({
+        chunkId: c.chunkId,
+        text: c.text,
+        startIndex: c.startIndex,
+        endIndex: c.endIndex,
+        tokenCount: c.tokenCount,
+        prevChunkId: c.prevChunkId,
+        nextChunkId: c.nextChunkId,
+      })),
       embeddings,
     );
 
@@ -86,7 +100,11 @@ export const ingestDocument = (
 
 export const removeDocumentFromAllStores = (
   docId: string,
-): Effect.Effect<void, DbError | SearchIndexError | ChromaDBError, Database | SearchIndex | ChromaDb> =>
+): Effect.Effect<
+  void,
+  DbError | SearchIndexError | ChromaDBError,
+  Database | SearchIndex | ChromaDb
+> =>
   Effect.gen(function* () {
     const db = yield* Database;
     const search = yield* SearchIndex;
@@ -112,7 +130,12 @@ export const removeDocumentFromAllStores = (
 
 export const reingestAllDocuments = (): Effect.Effect<
   { readonly documentCount: number; readonly chunkCount: number },
-  DbError | DocumentNotFoundError | SearchIndexError | ChromaDBError | EmbeddingError | ChunkingError,
+  | DbError
+  | DocumentNotFoundError
+  | SearchIndexError
+  | ChromaDBError
+  | EmbeddingError
+  | ChunkingError,
   Database | SearchIndex | ChromaDb | Embeddings
 > =>
   Effect.gen(function* () {
@@ -133,4 +156,118 @@ export const reingestAllDocuments = (): Effect.Effect<
     }
 
     return { documentCount: docCount, chunkCount: totalChunks };
+  });
+
+export const createWebsiteSource = (
+  url: string,
+): Effect.Effect<
+  { readonly docId: string; readonly chunkCount: number },
+  | DbError
+  | DocumentNotFoundError
+  | SearchIndexError
+  | ChromaDBError
+  | EmbeddingError
+  | ChunkingError
+  | WebsiteFetchError,
+  Database | SearchIndex | ChromaDb | Embeddings | WebsiteFetcher
+> =>
+  Effect.gen(function* () {
+    const db = yield* Database;
+    const fetcher = yield* WebsiteFetcher;
+    const page = yield* fetcher.fetchPage(url);
+    const now = Date.now();
+
+    const existing = yield* db.getWebsiteSourceByUrl(page.url);
+    const doc = existing
+      ? yield* db.updateDoc(existing.id, {
+          name: page.title,
+          fileType: "website",
+          size: page.byteSize,
+          canonicalUrl: page.canonicalUrl,
+          title: page.title,
+          description: page.description,
+          lastFetchedAt: now,
+          fetchStatus: "success",
+          fetchError: null,
+        })
+      : yield* db.createDoc({
+          name: page.title,
+          fileType: "website",
+          size: page.byteSize,
+          content: page.text,
+          sourceType: "website",
+          sourceUrl: page.url,
+          canonicalUrl: page.canonicalUrl,
+          title: page.title,
+          description: page.description,
+          lastFetchedAt: now,
+          fetchStatus: "success",
+          fetchError: null,
+        });
+
+    if (existing) {
+      yield* db.upsertDocContent(doc.id, page.text);
+    }
+
+    const result = yield* ingestDocument(doc.id);
+    return { docId: doc.id, chunkCount: result.chunkCount };
+  });
+
+export const refreshWebsiteSource = (
+  docId: string,
+): Effect.Effect<
+  { readonly docId: string; readonly chunkCount: number },
+  | DbError
+  | DocumentNotFoundError
+  | SearchIndexError
+  | ChromaDBError
+  | EmbeddingError
+  | ChunkingError
+  | WebsiteFetchError,
+  Database | SearchIndex | ChromaDb | Embeddings | WebsiteFetcher
+> =>
+  Effect.gen(function* () {
+    const db = yield* Database;
+    const fetcher = yield* WebsiteFetcher;
+    const doc = yield* db.getDoc(docId);
+
+    if (doc.source_type !== "website" || !doc.source_url) {
+      return yield* Effect.fail(
+        new WebsiteFetchError({
+          url: doc.source_url ?? docId,
+          message: "Document is not a website source",
+        }),
+      );
+    }
+
+    const page = yield* fetcher.fetchPage(doc.source_url).pipe(
+      Effect.tapError((error) =>
+        db
+          .updateDoc(docId, {
+            fetchStatus: "error",
+            fetchError: error.message,
+          })
+          .pipe(
+            Effect.asVoid,
+            Effect.catchAll(() => Effect.void),
+          ),
+      ),
+    );
+    const now = Date.now();
+
+    yield* db.updateDoc(docId, {
+      name: page.title,
+      fileType: "website",
+      size: page.byteSize,
+      canonicalUrl: page.canonicalUrl,
+      title: page.title,
+      description: page.description,
+      lastFetchedAt: now,
+      fetchStatus: "success",
+      fetchError: null,
+    });
+    yield* db.upsertDocContent(docId, page.text);
+
+    const result = yield* ingestDocument(docId);
+    return { docId, chunkCount: result.chunkCount };
   });

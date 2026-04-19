@@ -4,6 +4,7 @@ import { ChromaDbLive } from "@/lib/chroma";
 import { DatabaseLive } from "@/lib/db";
 import { EmbeddingsLive } from "@/lib/embed";
 import { SearchIndexLive } from "@/lib/search";
+import { WebsiteFetcherLive } from "@/lib/website";
 
 /**
  * Application layer using Supabase REST API
@@ -19,6 +20,7 @@ const ServiceLayer = Layer.mergeAll(
   SearchIndexLive,
   EmbeddingsLive,
   OllamaModelLive,
+  WebsiteFetcherLive,
 );
 
 export const AppLayer = ServiceLayer.pipe(Layer.provideMerge(BaseLayer));

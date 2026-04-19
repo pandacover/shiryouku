@@ -1,7 +1,7 @@
-import { BM25 } from "fast-bm25";
 import { Context, Effect, Layer, Ref } from "effect";
+import { BM25 } from "fast-bm25";
 import type { ChunkMeta } from "@/lib/chunk";
-import { Database, type DocRow, type DocChunkRow } from "@/lib/db";
+import { Database, type DocChunkRow } from "@/lib/db";
 import { SearchIndexError } from "@/lib/errors";
 
 export interface SearchMatch {
@@ -149,7 +149,7 @@ export const SearchIndexLive = Layer.effect(
       yield* Ref.set(statusRef, "initializing");
       yield* Effect.catchAll(
         Effect.gen(function* () {
-          const docs = yield* db.listDocs();
+          const docs = yield* db.listIndexableDocs();
 
           const bm25 = new BM25([], { stemming: true });
           const chunkMap = new Map<string, ChunkMeta>();

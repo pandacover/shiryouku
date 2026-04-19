@@ -22,6 +22,12 @@ export class ChunkingError extends Data.TaggedError("ChunkingError")<{
   readonly cause: unknown;
 }> {}
 
+export class WebsiteFetchError extends Data.TaggedError("WebsiteFetchError")<{
+  readonly url: string;
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
 export class ValidationError extends Data.TaggedError("ValidationError")<{
   readonly details: unknown;
 }> {}

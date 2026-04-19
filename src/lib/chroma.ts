@@ -1,7 +1,7 @@
 import { ChromaClient, type Collection } from "chromadb";
 import { Context, Effect, Layer, Ref } from "effect";
-import { ChromaDBError } from "@/lib/errors";
 import { ChromaUrl } from "@/lib/config";
+import { ChromaDBError } from "@/lib/errors";
 
 const COLLECTION_NAME = "shiryouku_chunks";
 
@@ -19,6 +19,11 @@ export class ChromaDb extends Context.Tag("ChromaDb")<
       chunks: ReadonlyArray<{
         readonly chunkId: string;
         readonly text: string;
+        readonly startIndex?: number;
+        readonly endIndex?: number;
+        readonly tokenCount?: number;
+        readonly prevChunkId?: string | null;
+        readonly nextChunkId?: string | null;
       }>,
       embeddings: ReadonlyArray<ReadonlyArray<number>>,
     ) => Effect.Effect<void, ChromaDBError>;
@@ -79,6 +84,11 @@ export const ChromaDbLive = Layer.effect(
       chunks: ReadonlyArray<{
         readonly chunkId: string;
         readonly text: string;
+        readonly startIndex?: number;
+        readonly endIndex?: number;
+        readonly tokenCount?: number;
+        readonly prevChunkId?: string | null;
+        readonly nextChunkId?: string | null;
       }>,
       embeddings: ReadonlyArray<ReadonlyArray<number>>,
     ): Effect.Effect<void, ChromaDBError> =>
@@ -87,10 +97,15 @@ export const ChromaDbLive = Layer.effect(
 
         const ids = chunks.map((c) => c.chunkId);
         const documents = chunks.map((c) => c.text);
-        const metadatas = chunks.map(() => ({
+        const metadatas = chunks.map((chunk) => ({
           docId,
           docName,
           fileType,
+          startIndex: chunk.startIndex ?? 0,
+          endIndex: chunk.endIndex ?? 0,
+          tokenCount: chunk.tokenCount ?? 0,
+          prevChunkId: chunk.prevChunkId ?? "",
+          nextChunkId: chunk.nextChunkId ?? "",
         }));
         const embeddingArrays = embeddings.map((e) => [...e]);
 
@@ -194,8 +209,8 @@ export const ChromaDbLive = Layer.effect(
               startIndex: Number(meta?.startIndex ?? 0),
               endIndex: Number(meta?.endIndex ?? 0),
               tokenCount: Number(meta?.tokenCount ?? 0),
-              prevChunkId: (meta?.prevChunkId as string) ?? null,
-              nextChunkId: (meta?.nextChunkId as string) ?? null,
+              prevChunkId: ((meta?.prevChunkId as string) || null) ?? null,
+              nextChunkId: ((meta?.nextChunkId as string) || null) ?? null,
               score: results.distances[0][i] ?? 0,
             });
           }
