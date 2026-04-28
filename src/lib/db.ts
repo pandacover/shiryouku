@@ -136,9 +136,11 @@ export class Supabase extends Context.Tag("Supabase")<
 
 // Create Supabase client from environment
 const createSupabaseClient = Effect.gen(function* () {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const url =
+    process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.PUBLIC_SUPABASE_URL;
   const key =
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
     process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!url || !key) {

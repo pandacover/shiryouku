@@ -51,13 +51,34 @@ export class ChromaDb extends Context.Tag("ChromaDb")<
       ChromaDBError
     >;
   }
->() {}
+>() { }
 
 export const ChromaDbLive = Layer.effect(
   ChromaDb,
   Effect.gen(function* () {
     const chromaUrl = yield* ChromaUrl;
-    const client = new ChromaClient({ path: chromaUrl });
+
+    const parsedChromaUrl = Effect.try({
+      try: () => new URL(chromaUrl),
+      catch: (e) =>
+        new ChromaDBError({
+          cause: `Invalid CHROMA_URL: ${chromaUrl} (${String(e)})`,
+        }),
+    });
+
+    const chromaConfig = yield* parsedChromaUrl.pipe(
+      Effect.map((url) => ({
+        host: url.hostname,
+        port: url.port
+          ? Number(url.port)
+          : url.protocol === "https:"
+            ? 443
+            : 8000,
+        ssl: url.protocol === "https:",
+      })),
+    );
+
+    const client = new ChromaClient(chromaConfig);
     const collectionRef = yield* Ref.make<Collection | null>(null);
 
     const getOrCreateCollection = (): Effect.Effect<

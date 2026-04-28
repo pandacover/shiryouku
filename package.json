@@ -9,7 +9,8 @@
     "lint": "biome check",
     "format": "biome format --write",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "mcp": "bun run src/mcp/server.ts"
   },
   "dependencies": {
     "@ai-sdk/langchain": "^2.0.174",
@@ -24,6 +25,7 @@
     "@effect/sql-pg": "^0.52.1",
     "@langchain/core": "^1.1.40",
     "@langchain/ollama": "^1.2.6",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@openrouter/ai-sdk-provider": "^2.5.1",
     "@radix-ui/react-use-controllable-state": "^1.2.2",
     "@streamdown/cjk": "^1.0.3",

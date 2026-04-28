@@ -1319,9 +1319,7 @@ export type PromptInputHoverCardProps = ComponentProps<typeof HoverCard>;
 
 export const PromptInputHoverCard = ({
   ...props
-}: PromptInputHoverCardProps) => (
-  <HoverCard {...props} />
-);
+}: PromptInputHoverCardProps) => <HoverCard {...props} />;
 
 export type PromptInputHoverCardTriggerProps = ComponentProps<
   typeof HoverCardTrigger

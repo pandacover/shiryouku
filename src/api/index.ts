@@ -5,6 +5,7 @@ import { chatRoutes } from "./routes/chat";
 import { docsRoutes } from "./routes/docs";
 import { embeddingRoutes } from "./routes/embedding";
 import { indexingRoutes } from "./routes/indexing";
+import { mcpRoutes } from "./routes/mcp";
 import { searchRoutes } from "./routes/search";
 import { sourcesRoutes } from "./routes/sources";
 
@@ -24,7 +25,8 @@ const api = new Hono()
   .route("/search", searchRoutes)
   .route("/chat", chatRoutes)
   .route("/indexing", indexingRoutes)
-  .route("/embedding", embeddingRoutes);
+  .route("/embedding", embeddingRoutes)
+  .route("/mcp", mcpRoutes);
 
 export type ApiType = typeof api;
 export { api };

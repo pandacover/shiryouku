@@ -46,6 +46,11 @@ export function isChunkable(fileType: string): boolean {
   return CHUNKABLE_TYPES.has(ext);
 }
 
+function normalizeChunkText(input: string): string {
+  // Collapse excess whitespace/newlines while keeping chunk content readable.
+  return input.replace(/\s+/g, " ").trim();
+}
+
 function applyOverlap(
   rawChunks: Chunk[],
   originalText: string,
@@ -104,15 +109,18 @@ export async function chunkDocument(
 
   const overlapped = applyOverlap(rawChunks, text);
 
-  const chunks: ChunkMeta[] = overlapped.map((c) => ({
-    ...c,
-    chunkId: nanoid(),
-    docId,
-    docName,
-    fileType,
-    prevChunkId: null,
-    nextChunkId: null,
-  }));
+  const chunks: ChunkMeta[] = overlapped
+    .map((c) => ({
+      ...c,
+      text: normalizeChunkText(c.text),
+      chunkId: nanoid(),
+      docId,
+      docName,
+      fileType,
+      prevChunkId: null,
+      nextChunkId: null,
+    }))
+    .filter((c) => c.text.length > 0);
 
   for (let i = 0; i < chunks.length; i++) {
     chunks[i].prevChunkId = i > 0 ? chunks[i - 1].chunkId : null;
