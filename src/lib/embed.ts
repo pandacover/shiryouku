@@ -1,103 +1,149 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { embed, embedMany } from "ai";
-import { getOrCreateCollection } from "@/lib/chroma";
-import { getDb } from "@/lib/db";
+import { Context, Duration, Effect, Layer, Redacted, Schedule } from "effect";
+import { ChromaDb } from "@/lib/chroma";
+import { OpenRouterApiKey } from "@/lib/config";
+import { Database, type DbError } from "@/lib/db";
+import {
+  type ChromaDBError,
+  type DocumentNotFoundError,
+  EmbeddingError,
+} from "@/lib/errors";
 
-const openrouter = createOpenRouter({
-  apiKey: process.env.OPENROUTER_API_KEY,
-});
+export class Embeddings extends Context.Tag("Embeddings")<
+  Embeddings,
+  {
+    readonly embedText: (
+      text: string,
+    ) => Effect.Effect<ReadonlyArray<number>, EmbeddingError>;
+    readonly embedTexts: (
+      texts: ReadonlyArray<string>,
+    ) => Effect.Effect<ReadonlyArray<ReadonlyArray<number>>, EmbeddingError>;
+    readonly embedDocChunks: (
+      docId: string,
+    ) => Effect.Effect<
+      { readonly chunkCount: number },
+      DbError | DocumentNotFoundError | ChromaDBError | EmbeddingError
+    >;
+    readonly embedAllDocChunks: () => Effect.Effect<
+      { readonly documentCount: number; readonly chunkCount: number },
+      DbError | DocumentNotFoundError | ChromaDBError | EmbeddingError
+    >;
+    readonly removeDocumentFromChroma: (
+      docId: string,
+    ) => Effect.Effect<void, ChromaDBError>;
+  }
+>() {}
 
-const embeddingModel = openrouter.textEmbeddingModel(
-  "perplexity/pplx-embed-v1-4b",
+const EMBED_RETRY_SCHEDULE = Schedule.exponential(Duration.seconds(1)).pipe(
+  Schedule.compose(Schedule.recurs(3)),
 );
 
-export async function embedText(text: string): Promise<number[]> {
-  const { embedding } = await embed({
-    model: embeddingModel,
-    value: text,
-  });
-  return embedding;
-}
+export const EmbeddingsLive = Layer.effect(
+  Embeddings,
+  Effect.gen(function* () {
+    const apiKey = yield* OpenRouterApiKey;
+    const db = yield* Database;
+    const chroma = yield* ChromaDb;
+    const openrouter = createOpenRouter({ apiKey: Redacted.value(apiKey) });
+    const embeddingModel = openrouter.textEmbeddingModel(
+      "perplexity/pplx-embed-v1-4b",
+    );
 
-export async function embedTexts(texts: string[]): Promise<number[][]> {
-  const { embeddings } = await embedMany({
-    model: embeddingModel,
-    values: texts,
-  });
-  return embeddings;
-}
+    const embedText = (
+      text: string,
+    ): Effect.Effect<ReadonlyArray<number>, EmbeddingError> =>
+      Effect.tryPromise({
+        try: () => embed({ model: embeddingModel, value: text }),
+        catch: (e) => new EmbeddingError({ cause: e }),
+      }).pipe(
+        Effect.map((r) => r.embedding as ReadonlyArray<number>),
+        Effect.retry(EMBED_RETRY_SCHEDULE),
+      );
 
-export async function embedDocChunks(
-  docId: string,
-): Promise<{ chunkCount: number }> {
-  const db = await getDb();
+    const embedTexts = (
+      texts: ReadonlyArray<string>,
+    ): Effect.Effect<ReadonlyArray<ReadonlyArray<number>>, EmbeddingError> =>
+      Effect.tryPromise({
+        try: () => embedMany({ model: embeddingModel, values: [...texts] }),
+        catch: (e) => new EmbeddingError({ cause: e }),
+      }).pipe(
+        Effect.map((r) => r.embeddings as ReadonlyArray<ReadonlyArray<number>>),
+        Effect.retry(EMBED_RETRY_SCHEDULE),
+      );
 
-  const doc = db
-    .prepare("SELECT name, file_type FROM docs WHERE id = ?")
-    .get(docId) as Record<string, unknown> | undefined;
+    const embedDocChunks = (
+      docId: string,
+    ): Effect.Effect<
+      { readonly chunkCount: number },
+      DbError | DocumentNotFoundError | ChromaDBError | EmbeddingError
+    > =>
+      Effect.gen(function* () {
+        const docResult = yield* db.getDoc(docId);
+        const docName = docResult.name;
+        const fileType = docResult.file_type;
 
-  if (!doc) throw new Error(`Document ${docId} not found`);
+        const rows = yield* db.getChunksForDoc(docId);
+        if (rows.length === 0) return { chunkCount: 0 };
 
-  const docName = doc.name as string;
-  const fileType = doc.file_type as string;
+        const texts = rows.map((r) => r.text);
+        const embeddings = yield* embedTexts(texts);
 
-  const rows = db
-    .prepare(
-      "SELECT chunk_id, text, start_index, end_index, token_count, prev_chunk_id, next_chunk_id FROM doc_chunks WHERE doc_id = ? ORDER BY start_index",
-    )
-    .all(docId) as Record<string, unknown>[];
+        yield* chroma.upsertEmbeddings(
+          docId,
+          docName,
+          fileType,
+          rows.map((r) => ({
+            chunkId: r.chunk_id,
+            text: r.text,
+            startIndex: r.start_index ?? 0,
+            endIndex: r.end_index ?? 0,
+            tokenCount: r.token_count ?? 0,
+            prevChunkId: r.prev_chunk_id,
+            nextChunkId: r.next_chunk_id,
+          })),
+          embeddings,
+        );
 
-  if (rows.length === 0) return { chunkCount: 0 };
+        return { chunkCount: rows.length };
+      });
 
-  const texts = rows.map((r) => r.text as string);
-  const embeddings = await embedTexts(texts);
+    const embedAllDocChunks = (): Effect.Effect<
+      { readonly documentCount: number; readonly chunkCount: number },
+      DbError | DocumentNotFoundError | ChromaDBError | EmbeddingError
+    > =>
+      Effect.gen(function* () {
+        const docIds = yield* db.getDocIds();
+        let totalChunks = 0;
+        let docCount = 0;
 
-  const collection = await getOrCreateCollection();
-  await collection.upsert({
-    ids: rows.map((r) => r.chunk_id as string),
-    embeddings,
-    documents: texts,
-    metadatas: rows.map((r) => ({
-      docId,
-      docName,
-      fileType,
-      startIndex: String(r.start_index),
-      endIndex: String(r.end_index),
-      tokenCount: String(r.token_count),
-      prevChunkId: (r.prev_chunk_id as string) || "",
-      nextChunkId: (r.next_chunk_id as string) || "",
-    })),
-  });
+        for (const docId of docIds) {
+          const result = yield* Effect.catchTag(
+            embedDocChunks(docId),
+            "DocumentNotFoundError",
+            () => Effect.succeed({ chunkCount: 0 }),
+          );
 
-  return { chunkCount: rows.length };
-}
+          totalChunks += result.chunkCount;
+          if (result.chunkCount > 0) docCount++;
+        }
 
-export async function embedAllDocChunks(): Promise<{
-  documentCount: number;
-  chunkCount: number;
-}> {
-  const db = await getDb();
-  const docs = db.prepare("SELECT id FROM docs").all() as Record<
-    string,
-    unknown
-  >[];
+        return { documentCount: docCount, chunkCount: totalChunks };
+      });
 
-  let totalChunks = 0;
-  let docCount = 0;
+    const removeDocumentFromChroma = (
+      docId: string,
+    ): Effect.Effect<void, ChromaDBError> =>
+      Effect.gen(function* () {
+        yield* chroma.removeDocument(docId);
+      });
 
-  for (const doc of docs) {
-    const docId = doc.id as string;
-    const result = await embedDocChunks(docId);
-    totalChunks += result.chunkCount;
-    if (result.chunkCount > 0) docCount++;
-  }
-
-  return { documentCount: docCount, chunkCount: totalChunks };
-}
-
-export async function removeDocumentFromChroma(docId: string): Promise<void> {
-  const collection = await getOrCreateCollection();
-  await collection.delete({
-    where: { docId } as Record<string, string>,
-  });
-}
+    return Embeddings.of({
+      embedText,
+      embedTexts,
+      embedDocChunks,
+      embedAllDocChunks,
+      removeDocumentFromChroma,
+    });
+  }),
+);

@@ -1,23 +1,26 @@
+import { FileTextIcon, GlobeIcon, HomeIcon, SearchIcon } from "lucide-react";
 import { NavLink } from "react-router";
-import { FileTextIcon, HomeIcon, SearchIcon } from "lucide-react";
-
-import { cn } from "@/lib/utils";
-import { Separator } from "@/components/ui/separator";
 import { buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 const Links = [
   {
-    to: "/",
+    to: "/dashboard/home",
     icon: <HomeIcon className="size-4" />,
     label: "Home",
   },
   {
-    to: "/documents",
+    to: "/dashboard/documents",
     icon: <FileTextIcon className="size-4" />,
     label: "Documents",
   },
   {
-    to: "/research",
+    to: "/dashboard/sources",
+    icon: <GlobeIcon className="size-4" />,
+    label: "Sources",
+  },
+  {
+    to: "/dashboard/research",
     icon: <SearchIcon className="size-4" />,
     label: "Research",
   },

@@ -23,6 +23,7 @@ import {
   useDoc,
   useDocs,
 } from "@/lib/hooks/use-docs";
+import { Outlet } from "react-router";
 
 interface DashboardContextValue {
   documents: DocumentMeta[];
@@ -46,7 +47,7 @@ export const useDashboard = () => {
 };
 
 interface DashboardShellProps {
-  children: ReactNode;
+  children?: ReactNode;
 }
 
 export const DashboardShell = ({ children }: DashboardShellProps) => {
@@ -175,7 +176,9 @@ export const DashboardShell = ({ children }: DashboardShellProps) => {
     <DashboardContext.Provider value={contextValue}>
       <div className="flex min-h-screen w-full bg-background">
         <SidebarNavigation />
-        <main className="flex min-w-0 flex-1 flex-col">{children}</main>
+        <main className="flex min-w-0 flex-1 flex-col">
+          <Outlet />
+        </main>
       </div>
       <input
         className="hidden"

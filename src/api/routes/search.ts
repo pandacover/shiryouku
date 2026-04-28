@@ -1,6 +1,8 @@
+import { Effect } from "effect";
 import { Hono } from "hono";
+import { runEffect } from "@/api/bridge";
 import { searchQuerySchema } from "@/api/schemas/search";
-import { searchIndex } from "@/lib/search";
+import { SearchIndex } from "@/lib/search";
 
 export const searchRoutes = new Hono().get("/", async (c) => {
   const q = c.req.query("q") || "";
@@ -17,14 +19,12 @@ export const searchRoutes = new Hono().get("/", async (c) => {
 
   const { q: query, limit } = parsed.data;
 
-  try {
-    const results = await searchIndex.search(query, limit);
-    return c.json({ data: { results } });
-  } catch (err) {
-    console.error("[Search Error]", err);
-    return c.json(
-      { error: "Search failed", details: (err as Error).message },
-      500,
-    );
-  }
+  return runEffect(
+    c,
+    Effect.gen(function* () {
+      const search = yield* SearchIndex;
+      const results = yield* search.search(query, limit);
+      return { results };
+    }),
+  );
 });

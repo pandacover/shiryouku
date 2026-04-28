@@ -21,7 +21,6 @@ import {
   memo,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useState,
 } from "react";
@@ -116,7 +115,6 @@ interface MessageBranchContextType {
   goToPrevious: () => void;
   goToNext: () => void;
   branches: ReactElement[];
-  setBranches: (branches: ReactElement[]) => void;
 }
 
 const MessageBranchContext = createContext<MessageBranchContextType | null>(
@@ -144,10 +142,14 @@ export const MessageBranch = ({
   defaultBranch = 0,
   onBranchChange,
   className,
+  children,
   ...props
 }: MessageBranchProps) => {
   const [currentBranch, setCurrentBranch] = useState(defaultBranch);
-  const [branches, setBranches] = useState<ReactElement[]>([]);
+  const branches = useMemo(
+    () => (Array.isArray(children) ? children : [children]),
+    [children],
+  );
 
   const handleBranchChange = useCallback(
     (newBranch: number) => {
@@ -175,7 +177,6 @@ export const MessageBranch = ({
       currentBranch,
       goToNext,
       goToPrevious,
-      setBranches,
       totalBranches: branches.length,
     }),
     [branches, currentBranch, goToNext, goToPrevious],
@@ -197,20 +198,9 @@ export const MessageBranchContent = ({
   children,
   ...props
 }: MessageBranchContentProps) => {
-  const { currentBranch, setBranches, branches } = useMessageBranch();
-  const childrenArray = useMemo(
-    () => (Array.isArray(children) ? children : [children]),
-    [children],
-  );
+  const { currentBranch, branches } = useMessageBranch();
 
-  // Use useEffect to update branches when they change
-  useEffect(() => {
-    if (branches.length !== childrenArray.length) {
-      setBranches(childrenArray);
-    }
-  }, [childrenArray, branches, setBranches]);
-
-  return childrenArray.map((branch, index) => (
+  return branches.map((branch, index) => (
     <div
       className={cn(
         "grid gap-2 overflow-hidden [&>div]:pb-0",

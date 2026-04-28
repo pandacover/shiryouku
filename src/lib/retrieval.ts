@@ -1,29 +1,46 @@
-import type { Metadata } from "chromadb";
+import { Effect, Layer } from "effect";
 import { reciprocalRankFusion } from "rerank";
-import { getOrCreateCollection } from "@/lib/chroma";
-import { embedText } from "@/lib/embed";
-import type { SearchMatch, SearchResultGroup } from "@/lib/search";
-import { searchIndex } from "@/lib/search";
+import {
+  SearchIndex,
+  type SearchMatch,
+  type SearchResultGroup,
+} from "@/lib/search";
+import { ChromaDb } from "@/lib/chroma";
+import { Embeddings } from "@/lib/embed";
+import { SearchIndexError, ChromaDBError, EmbeddingError } from "@/lib/errors";
 
-interface HybridResult {
-  chunkId: string;
-  text: string;
-  docId: string;
-  docName: string;
-  fileType: string;
-  startIndex: number;
-  endIndex: number;
-  tokenCount: number;
-  prevChunkId: string | null;
-  nextChunkId: string | null;
-  rrfScore: number;
-  source: "keyword" | "semantic" | "both";
+export interface HybridResult {
+  readonly chunkId: string;
+  readonly text: string;
+  readonly docId: string;
+  readonly docName: string;
+  readonly fileType: string;
+  readonly startIndex: number;
+  readonly endIndex: number;
+  readonly tokenCount: number;
+  readonly prevChunkId: string | null;
+  readonly nextChunkId: string | null;
+  readonly rrfScore: number;
+  readonly source: "keyword" | "semantic" | "both";
+}
+
+interface RRFItem {
+  readonly chunkId: string;
+  readonly text: string;
+  readonly docId: string;
+  readonly docName: string;
+  readonly fileType: string;
+  readonly startIndex: number;
+  readonly endIndex: number;
+  readonly tokenCount: number;
+  readonly prevChunkId: string | null;
+  readonly nextChunkId: string | null;
 }
 
 function searchMatchToRRFItem(
   match: SearchMatch,
   doc: SearchResultGroup["doc"],
-) {
+): RRFItem {
   return {
     chunkId: match.chunkId,
     text: match.text,
@@ -38,151 +55,129 @@ function searchMatchToRRFItem(
   };
 }
 
-export async function hybridSearch(
+export const hybridSearch = (
   query: string,
   topK = 10,
-): Promise<HybridResult[]> {
-  const [keywordResults, semanticResults] = await Promise.all([
-    searchIndex.search(query, topK).catch(() => [] as SearchResultGroup[]),
-    semanticSearch(query, topK).catch(() => []),
-  ]);
+): Effect.Effect<
+  ReadonlyArray<HybridResult>,
+  never,
+  SearchIndex | ChromaDb | Embeddings
+> =>
+  Effect.gen(function* () {
+    const search = yield* SearchIndex;
+    const chroma = yield* ChromaDb;
+    const embedSvc = yield* Embeddings;
 
-  const keywordItems = keywordResults.flatMap((group) =>
-    group.matches.map((m) => searchMatchToRRFItem(m, group.doc)),
-  );
+    const [keywordResults, queryEmbedding] = yield* Effect.all(
+      [
+        search
+          .search(query, topK)
+          .pipe(
+            Effect.catchTag("SearchIndexError", (e) =>
+              Effect.logWarning(`BM25 search failed: ${String(e.cause)}`).pipe(
+                Effect.as([]),
+              ),
+            ),
+          ),
+        embedSvc
+          .embedText(query)
+          .pipe(
+            Effect.catchTag("EmbeddingError", (e) =>
+              Effect.logWarning(`Embedding failed: ${String(e.cause)}`).pipe(
+                Effect.as(null),
+              ),
+            ),
+          ),
+      ],
+      { concurrency: 2 },
+    );
 
-  const semanticItems = semanticResults.map((r) => ({
-    chunkId: r.chunkId,
-    text: r.text,
-    docId: r.docId,
-    docName: r.docName,
-    fileType: r.fileType,
-    startIndex: r.startIndex,
-    endIndex: r.endIndex,
-    tokenCount: r.tokenCount,
-    prevChunkId: r.prevChunkId as string | null,
-    nextChunkId: r.nextChunkId as string | null,
-  }));
-
-  const keywordRankedLists = keywordItems.map((item) => ({
-    ...item,
-    chunkId: item.chunkId,
-  }));
-
-  const semanticRankedLists = semanticItems.map((item) => ({
-    ...item,
-    chunkId: item.chunkId,
-  }));
-
-  const rrfScores = reciprocalRankFusion(
-    [keywordRankedLists, semanticRankedLists],
-    "chunkId",
-  );
-
-  const allItemsMap = new Map<
-    string,
-    (typeof keywordItems)[0] & { source: "keyword" | "semantic" | "both" }
-  >();
-
-  for (const item of keywordItems) {
-    allItemsMap.set(item.chunkId, { ...item, source: "keyword" });
-  }
-  for (const item of semanticItems) {
-    const existing = allItemsMap.get(item.chunkId);
-    if (existing) {
-      existing.source = "both";
-    } else {
-      allItemsMap.set(item.chunkId, { ...item, source: "semantic" });
+    if (queryEmbedding === null) {
+      return keywordResults.flatMap((group) =>
+        group.matches.map((m) => ({
+          ...searchMatchToRRFItem(m, group.doc),
+          rrfScore: 0,
+          source: "keyword" as const,
+        })),
+      );
     }
-  }
 
-  const sortedChunkIds = Array.from(rrfScores.keys());
+    const semanticResults = yield* chroma
+      .querySimilar(queryEmbedding, topK)
+      .pipe(
+        Effect.catchTag("ChromaDBError", (e) =>
+          Effect.logWarning(`Semantic search failed: ${String(e.cause)}`).pipe(
+            Effect.as([]),
+          ),
+        ),
+      );
 
-  return sortedChunkIds
-    .map((chunkId) => {
-      const item = allItemsMap.get(chunkId);
-      if (!item) return null;
-      return {
-        ...item,
-        rrfScore: rrfScores.get(chunkId) ?? 0,
-      };
-    })
-    .filter((r): r is HybridResult => r !== null);
-}
+    const keywordItems = keywordResults.flatMap((group) =>
+      group.matches.map((m) => searchMatchToRRFItem(m, group.doc)),
+    );
 
-async function semanticSearch(
-  query: string,
-  topK: number,
-): Promise<
-  Array<{
-    chunkId: string;
-    text: string;
-    docId: string;
-    docName: string;
-    fileType: string;
-    startIndex: number;
-    endIndex: number;
-    tokenCount: number;
-    prevChunkId: string | null;
-    nextChunkId: string | null;
-  }>
-> {
-  const queryEmbedding = await embedText(query);
+    const semanticItems: ReadonlyArray<RRFItem> = semanticResults.map((r) => ({
+      chunkId: r.chunkId,
+      text: r.text,
+      docId: r.docId,
+      docName: r.docName,
+      fileType: r.fileType,
+      startIndex: r.startIndex,
+      endIndex: r.endIndex,
+      tokenCount: r.tokenCount,
+      prevChunkId: r.prevChunkId,
+      nextChunkId: r.nextChunkId,
+    }));
 
-  const collection = await getOrCreateCollection();
-  const results = await collection.query({
-    queryEmbeddings: [queryEmbedding],
-    nResults: topK,
-    include: ["documents", "metadatas", "distances"] as Array<
-      "documents" | "metadatas" | "distances"
-    >,
+    const keywordRankedLists = keywordItems.map((item) => ({
+      ...item,
+      chunkId: item.chunkId,
+    }));
+
+    const semanticRankedLists = semanticItems.map((item) => ({
+      ...item,
+      chunkId: item.chunkId,
+    }));
+
+    const rrfScores = reciprocalRankFusion(
+      [keywordRankedLists, semanticRankedLists],
+      "chunkId",
+    );
+
+    const allItemsMap = new Map<
+      string,
+      RRFItem & { source: "keyword" | "semantic" | "both" }
+    >();
+
+    for (const item of keywordItems) {
+      allItemsMap.set(item.chunkId, { ...item, source: "keyword" });
+    }
+    for (const item of semanticItems) {
+      const existing = allItemsMap.get(item.chunkId);
+      if (existing) {
+        allItemsMap.set(item.chunkId, { ...existing, source: "both" });
+      } else {
+        allItemsMap.set(item.chunkId, { ...item, source: "semantic" });
+      }
+    }
+
+    const sortedChunkIds = Array.from(rrfScores.keys());
+
+    return sortedChunkIds
+      .map((chunkId) => {
+        const item = allItemsMap.get(chunkId);
+        if (!item) return null;
+        return { ...item, rrfScore: rrfScores.get(chunkId) ?? 0 };
+      })
+      .filter((r): r is HybridResult => r !== null);
   });
 
-  const chunks: Array<{
-    chunkId: string;
-    text: string;
-    docId: string;
-    docName: string;
-    fileType: string;
-    startIndex: number;
-    endIndex: number;
-    tokenCount: number;
-    prevChunkId: string | null;
-    nextChunkId: string | null;
-  }> = [];
-
-  const ids = results.ids[0] ?? [];
-  const documents = results.documents[0] ?? [];
-  const metadatas = results.metadatas[0] ?? [];
-
-  for (let i = 0; i < ids.length; i++) {
-    const meta = metadatas[i] as Metadata | null;
-    const doc = documents[i];
-    chunks.push({
-      chunkId: ids[i],
-      text: doc ?? "",
-      docId: (meta?.docId as string) ?? "",
-      docName: (meta?.docName as string) ?? "",
-      fileType: (meta?.fileType as string) ?? "",
-      startIndex: Number(meta?.startIndex ?? 0),
-      endIndex: Number(meta?.endIndex ?? 0),
-      tokenCount: Number(meta?.tokenCount ?? 0),
-      prevChunkId: (meta?.prevChunkId as string) || null,
-      nextChunkId: (meta?.nextChunkId as string) || null,
-    });
-  }
-
-  return chunks;
-}
-
-export function formatAnnotatedText(results: HybridResult[]): string {
+export function formatAnnotatedText(
+  results: ReadonlyArray<HybridResult>,
+): string {
   const groupedByDoc = new Map<
     string,
-    {
-      docName: string;
-      fileType: string;
-      chunks: HybridResult[];
-    }
+    { docName: string; fileType: string; chunks: HybridResult[] }
   >();
 
   for (const result of results) {
@@ -206,7 +201,7 @@ export function formatAnnotatedText(results: HybridResult[]): string {
 
     for (const chunk of group.chunks) {
       if (chunk.prevChunkId) {
-        const prevChunk = findChunkInResults(chunk.prevChunkId, results);
+        const prevChunk = results.find((r) => r.chunkId === chunk.prevChunkId);
         if (prevChunk) {
           parts.push(prevChunk.text);
         }
@@ -215,7 +210,7 @@ export function formatAnnotatedText(results: HybridResult[]): string {
       parts.push(chunk.text);
 
       if (chunk.nextChunkId) {
-        const nextChunk = findChunkInResults(chunk.nextChunkId, results);
+        const nextChunk = results.find((r) => r.chunkId === chunk.nextChunkId);
         if (nextChunk) {
           parts.push(nextChunk.text);
         }
@@ -224,11 +219,4 @@ export function formatAnnotatedText(results: HybridResult[]): string {
   }
 
   return parts.join("\n");
-}
-
-function findChunkInResults(
-  chunkId: string,
-  results: HybridResult[],
-): HybridResult | undefined {
-  return results.find((r) => r.chunkId === chunkId);
 }

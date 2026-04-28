@@ -119,6 +119,85 @@ export interface DocWithContent extends DocResponse {
 export type DocListResponse = { data: DocResponse[] };
 export type DocDetailResponse = { data: DocWithContent };
 
+export interface SourceResponse {
+  id: string;
+  name: string;
+  url: string;
+  canonicalUrl: string | null;
+  title: string | null;
+  description: string | null;
+  size: number;
+  fetchStatus: "success" | "error" | null;
+  fetchError: string | null;
+  lastFetchedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SourceWithContent extends SourceResponse {
+  content: string;
+}
+
+export type SourceListResponse = { data: SourceResponse[] };
+export type SourceDetailResponse = { data: SourceWithContent };
+
+export interface SourceMutationResponse {
+  source: SourceResponse;
+  chunkCount: number;
+}
+
+export async function createSource(body: { url: string }) {
+  const res = await fetch(`${BASE_URL}/sources`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      ((data as Record<string, unknown>).details as string) ??
+        ((data as Record<string, unknown>).error as string) ??
+        `Create source failed: ${res.status}`,
+    );
+  }
+
+  const json = (await res.json()) as ApiResponse<SourceMutationResponse>;
+  return "data" in json ? json.data : json;
+}
+
+export async function refreshSource(id: string) {
+  const res = await fetch(`${BASE_URL}/sources/${id}/refresh`, {
+    method: "POST",
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      ((data as Record<string, unknown>).details as string) ??
+        ((data as Record<string, unknown>).error as string) ??
+        `Refresh source failed: ${res.status}`,
+    );
+  }
+
+  const json = (await res.json()) as ApiResponse<SourceMutationResponse>;
+  return "data" in json ? json.data : json;
+}
+
+export async function deleteSource(id: string) {
+  const res = await fetch(`${BASE_URL}/sources/${id}`, { method: "DELETE" });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      ((data as Record<string, unknown>).error as string) ??
+        `Delete source failed: ${res.status}`,
+    );
+  }
+
+  return id;
+}
+
 export interface SearchMatchResult {
   chunkId: string;
   text: string;
@@ -178,11 +257,10 @@ export async function reindexDocs() {
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const error =
-      (data as Record<string, unknown>).error ?? `Reindex failed: ${res.status}`;
+      (data as Record<string, unknown>).error ??
+      `Reindex failed: ${res.status}`;
     const details = (data as Record<string, unknown>).details;
-    throw new Error(
-      details ? `${error}: ${details}` : (error as string),
-    );
+    throw new Error(details ? `${error}: ${details}` : (error as string));
   }
 
   const json = (await res.json()) as ApiResponse<ReindexResponse>;

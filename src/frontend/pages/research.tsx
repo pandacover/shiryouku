@@ -43,8 +43,8 @@ type KeywordSearchResult = {
 type KeywordSearchToolPart = ToolUIPart<{
   keyword_search: {
     input: {
-      query: string,
-      limit: number
+      query: string;
+      limit: number;
     };
     output: { context: string };
   };
@@ -97,12 +97,14 @@ export const ResearchPage = () => {
                 );
 
                 if (isKeywordSearchTool(part)) {
-                  return <ChainOfThoughtStep
-                    key={`chain-of-thought-tool-${message.id}-${i}`}
-                    icon={SearchIcon}
-                    status={status}
-                    label={part.input?.query}
-                  />
+                  return (
+                    <ChainOfThoughtStep
+                      key={`chain-of-thought-tool-${message.id}-${i}`}
+                      icon={SearchIcon}
+                      status={status}
+                      label={part.input?.query}
+                    />
+                  );
                 }
 
                 if (isReasoningUIPart(part)) {

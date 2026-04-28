@@ -1,11 +1,9 @@
+import { Effect } from "effect";
 import { Hono } from "hono";
 import { z } from "zod";
-import { deleteCollection } from "@/lib/chroma";
-import {
-  embedAllDocChunks,
-  embedDocChunks,
-  removeDocumentFromChroma,
-} from "@/lib/embed";
+import { runEffect } from "@/api/bridge";
+import { ChromaDb } from "@/lib/chroma";
+import { Embeddings } from "@/lib/embed";
 
 export const embeddingRoutes = new Hono()
   .post("/embed", async (c) => {
@@ -19,61 +17,47 @@ export const embeddingRoutes = new Hono()
       );
     }
 
-    try {
-      const result = await embedDocChunks(parsed.data.docId);
-      return c.json({ data: result }, 201);
-    } catch (err) {
-      console.error("[Embed Error]", err);
-      return c.json(
-        { error: "Embedding failed", details: (err as Error).message },
-        500,
-      );
-    }
+    return runEffect(
+      c,
+      Effect.gen(function* () {
+        const embed = yield* Embeddings;
+        const result = yield* embed.embedDocChunks(parsed.data.docId);
+        return result;
+      }),
+    );
   })
 
   .post("/embed-all", async (c) => {
-    try {
-      const result = await embedAllDocChunks();
-      return c.json({ data: result });
-    } catch (err) {
-      console.error("[Embed All Error]", err);
-      return c.json(
-        {
-          error: "Embedding all documents failed",
-          details: (err as Error).message,
-        },
-        500,
-      );
-    }
+    return runEffect(
+      c,
+      Effect.gen(function* () {
+        const embed = yield* Embeddings;
+        const result = yield* embed.embedAllDocChunks();
+        return result;
+      }),
+    );
   })
 
   .delete("/embed/:docId", async (c) => {
     const docId = c.req.param("docId");
 
-    try {
-      await removeDocumentFromChroma(docId);
-      return c.json({ data: { docId } });
-    } catch (err) {
-      console.error("[Embed Remove Error]", err);
-      return c.json(
-        { error: "Removal failed", details: (err as Error).message },
-        500,
-      );
-    }
+    return runEffect(
+      c,
+      Effect.gen(function* () {
+        const embed = yield* Embeddings;
+        yield* embed.removeDocumentFromChroma(docId);
+        return { docId };
+      }),
+    );
   })
 
   .delete("/embed", async (c) => {
-    try {
-      await deleteCollection();
-      return c.json({ data: { deleted: true } });
-    } catch (err) {
-      console.error("[Embed Delete Collection Error]", err);
-      return c.json(
-        {
-          error: "Failed to delete collection",
-          details: (err as Error).message,
-        },
-        500,
-      );
-    }
+    return runEffect(
+      c,
+      Effect.gen(function* () {
+        const chroma = yield* ChromaDb;
+        yield* chroma.deleteCollection();
+        return { deleted: true };
+      }),
+    );
   });

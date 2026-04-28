@@ -2,7 +2,15 @@ import type { Chunk } from "@chonkiejs/core";
 import { RecursiveChunker } from "@chonkiejs/core";
 import { nanoid } from "nanoid";
 
-const CHUNKABLE_TYPES = new Set(["txt", "text/plain", "md", "markdown"]);
+const CHUNKABLE_TYPES = new Set([
+  "txt",
+  "text/plain",
+  "md",
+  "markdown",
+  "html",
+  "text/html",
+  "website",
+]);
 const DEFAULT_CHUNK_SIZE = 512;
 const OVERLAP_RATIO = 0.2;
 
@@ -36,6 +44,11 @@ async function getChunker(): Promise<RecursiveChunker> {
 export function isChunkable(fileType: string): boolean {
   const ext = fileType.toLowerCase().replace(/^\./, "");
   return CHUNKABLE_TYPES.has(ext);
+}
+
+function normalizeChunkText(input: string): string {
+  // Collapse excess whitespace/newlines while keeping chunk content readable.
+  return input.replace(/\s+/g, " ").trim();
 }
 
 function applyOverlap(
@@ -96,15 +109,18 @@ export async function chunkDocument(
 
   const overlapped = applyOverlap(rawChunks, text);
 
-  const chunks: ChunkMeta[] = overlapped.map((c) => ({
-    ...c,
-    chunkId: nanoid(),
-    docId,
-    docName,
-    fileType,
-    prevChunkId: null,
-    nextChunkId: null,
-  }));
+  const chunks: ChunkMeta[] = overlapped
+    .map((c) => ({
+      ...c,
+      text: normalizeChunkText(c.text),
+      chunkId: nanoid(),
+      docId,
+      docName,
+      fileType,
+      prevChunkId: null,
+      nextChunkId: null,
+    }))
+    .filter((c) => c.text.length > 0);
 
   for (let i = 0; i < chunks.length; i++) {
     chunks[i].prevChunkId = i > 0 ? chunks[i - 1].chunkId : null;

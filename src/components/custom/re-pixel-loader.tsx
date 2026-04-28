@@ -56,7 +56,7 @@ export function RePixelLoader({
                   : undefined,
               }}
             />
-          ))
+          )),
         )}
       </div>
     </>

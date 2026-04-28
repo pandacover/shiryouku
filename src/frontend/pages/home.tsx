@@ -7,8 +7,7 @@ export const Home = () => {
       <div className="px-4 py-3">
         <h1>Shiryouku</h1>
       </div>
-      <div className="min-h-0 flex-1">
-      </div>
+      <div className="min-h-0 flex-1"></div>
     </div>
   );
 };
